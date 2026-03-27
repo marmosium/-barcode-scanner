@@ -2,7 +2,7 @@
 
 import { FormEvent, useState } from "react";
 import { useRouter } from "next/navigation";
-import { supabase } from "@/lib/supabase/client";
+import { getSupabaseClient } from "@/lib/supabase/client";
 
 export default function Home() {
   const router = useRouter();
@@ -16,9 +16,19 @@ export default function Home() {
     setLoading(true);
     setMessage(null);
 
-    const { error } = await supabase.auth.signInWithPassword({ email, password });
+    let errorMessage: string | null = null;
 
-    if (error) setMessage(error.message);
+    try {
+      const supabase = getSupabaseClient();
+      const { error } = await supabase.auth.signInWithPassword({ email, password });
+      if (error) {
+        errorMessage = error.message;
+      }
+    } catch (error) {
+      errorMessage = error instanceof Error ? error.message : "Beklenmeyen bir hata oluştu.";
+    }
+
+    if (errorMessage) setMessage(errorMessage);
     else {
       setMessage("Giriş başarılı. Yönlendiriliyorsun...");
       router.push("/home");

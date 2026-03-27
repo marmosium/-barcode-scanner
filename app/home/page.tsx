@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { BrowserMultiFormatReader, IScannerControls } from "@zxing/browser";
-import { supabase } from "@/lib/supabase/client";
+import { getSupabaseClient } from "@/lib/supabase/client";
 
 type StockRow = {
   id: number;
@@ -30,6 +30,16 @@ export default function HomePage() {
   const [activeAction, setActiveAction] = useState<StockActionType | null>(null);
   const [actionMessage, setActionMessage] = useState<string | null>(null);
 
+  const getClientOrNotify = useCallback(() => {
+    try {
+      return getSupabaseClient();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Supabase bağlantı hatası.";
+      setActionMessage(message);
+      return null;
+    }
+  }, []);
+
   const stopScanner = useCallback(() => {
     scannerControlsRef.current?.stop();
     scannerControlsRef.current = null;
@@ -38,6 +48,12 @@ export default function HomePage() {
   }, []);
 
   const loadStocks = useCallback(async () => {
+    const supabase = getClientOrNotify();
+    if (!supabase) {
+      setLoadingRows(false);
+      return;
+    }
+
     setLoadingRows(true);
 
     const { data, error } = await supabase
@@ -53,10 +69,15 @@ export default function HomePage() {
     }
 
     setLoadingRows(false);
-  }, []);
+  }, [getClientOrNotify]);
 
   const applyStockAction = useCallback(
     async (barcode: string, action: StockActionType) => {
+      const supabase = getClientOrNotify();
+      if (!supabase) {
+        return;
+      }
+
       const cleanedBarcode = barcode.trim();
 
       if (!cleanedBarcode) {
@@ -132,7 +153,7 @@ export default function HomePage() {
 
       await loadStocks();
     },
-    [loadStocks]
+    [getClientOrNotify, loadStocks]
   );
 
   const startScanner = useCallback(
@@ -187,6 +208,11 @@ export default function HomePage() {
 
   useEffect(() => {
     const checkSessionAndLoad = async () => {
+      const supabase = getClientOrNotify();
+      if (!supabase) {
+        return;
+      }
+
       const { data, error } = await supabase.auth.getSession();
       if (error || !data.session) {
         router.replace("/");
@@ -201,7 +227,7 @@ export default function HomePage() {
     return () => {
       stopScanner();
     };
-  }, [loadStocks, router, stopScanner]);
+  }, [getClientOrNotify, loadStocks, router, stopScanner]);
 
   return (
     <div className="min-h-screen bg-zinc-50 dark:bg-black p-4 sm:p-6">
