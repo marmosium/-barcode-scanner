@@ -17,7 +17,7 @@ type StockRow = {
 
 type StockActionType = "giris" | "cikis";
 
-const supportedFormats = [
+const cameraFormats = [
   BarcodeFormat.QR_CODE,
   BarcodeFormat.CODE_128,
   BarcodeFormat.CODE_39,
@@ -29,10 +29,143 @@ const supportedFormats = [
   BarcodeFormat.CODABAR,
 ];
 
-const hints = new Map();
-hints.set(DecodeHintType.POSSIBLE_FORMATS, supportedFormats);
+const imageFormats = [
+  BarcodeFormat.QR_CODE,
+  BarcodeFormat.DATA_MATRIX,
+  BarcodeFormat.PDF_417,
+  BarcodeFormat.AZTEC,
+  BarcodeFormat.CODE_128,
+  BarcodeFormat.CODE_39,
+  BarcodeFormat.CODE_93,
+  BarcodeFormat.EAN_13,
+  BarcodeFormat.EAN_8,
+  BarcodeFormat.UPC_A,
+  BarcodeFormat.UPC_E,
+  BarcodeFormat.ITF,
+  BarcodeFormat.CODABAR,
+];
 
-const barcodeReader = new BrowserMultiFormatReader(hints);
+const cameraHints = new Map();
+cameraHints.set(DecodeHintType.POSSIBLE_FORMATS, cameraFormats);
+
+const fastImageHints = new Map();
+fastImageHints.set(DecodeHintType.POSSIBLE_FORMATS, cameraFormats);
+
+const imageHints = new Map();
+imageHints.set(DecodeHintType.POSSIBLE_FORMATS, imageFormats);
+imageHints.set(DecodeHintType.TRY_HARDER, true);
+
+const cameraReader = new BrowserMultiFormatReader(cameraHints, {
+  delayBetweenScanAttempts: 50,
+  delayBetweenScanSuccess: 120,
+});
+
+const fastImageReader = new BrowserMultiFormatReader(fastImageHints);
+const imageReader = new BrowserMultiFormatReader(imageHints);
+
+async function loadImageElement(src: string) {
+  return await new Promise<HTMLImageElement>((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => resolve(image);
+    image.onerror = () => reject(new Error("Görsel yüklenemedi."));
+    image.src = src;
+  });
+}
+
+function drawToCanvasWithRotation(image: HTMLImageElement, rotation: number) {
+  const radians = (rotation * Math.PI) / 180;
+  const isSideways = rotation === 90 || rotation === 270;
+
+  const sourceWidth = image.naturalWidth || image.width;
+  const sourceHeight = image.naturalHeight || image.height;
+  const targetWidth = isSideways ? sourceHeight : sourceWidth;
+  const targetHeight = isSideways ? sourceWidth : sourceHeight;
+
+  const canvas = document.createElement("canvas");
+  canvas.width = targetWidth;
+  canvas.height = targetHeight;
+
+  const context = canvas.getContext("2d");
+  if (!context) {
+    throw new Error("Canvas başlatılamadı.");
+  }
+
+  context.translate(targetWidth / 2, targetHeight / 2);
+  context.rotate(radians);
+  context.drawImage(image, -sourceWidth / 2, -sourceHeight / 2);
+
+  return canvas;
+}
+
+function createNormalizedCanvas(image: HTMLImageElement, rotation: number, maxDimension = 1600) {
+  const rotatedCanvas = drawToCanvasWithRotation(image, rotation);
+  const longEdge = Math.max(rotatedCanvas.width, rotatedCanvas.height);
+
+  if (longEdge <= maxDimension) {
+    return rotatedCanvas;
+  }
+
+  const scale = maxDimension / longEdge;
+  const scaledCanvas = document.createElement("canvas");
+  scaledCanvas.width = Math.round(rotatedCanvas.width * scale);
+  scaledCanvas.height = Math.round(rotatedCanvas.height * scale);
+
+  const context = scaledCanvas.getContext("2d");
+  if (!context) {
+    return rotatedCanvas;
+  }
+
+  context.drawImage(rotatedCanvas, 0, 0, scaledCanvas.width, scaledCanvas.height);
+  return scaledCanvas;
+}
+
+async function decodeUploadedImage(file: File) {
+  const imageUrl = URL.createObjectURL(file);
+
+  try {
+    const image = await loadImageElement(imageUrl);
+    const fastRotations = [0, 90];
+    const robustRotations = [0, 90, 180, 270];
+
+    for (const rotation of fastRotations) {
+      try {
+        const fastCanvas = createNormalizedCanvas(image, rotation, 1400);
+        const fastResult = fastImageReader.decodeFromCanvas(fastCanvas);
+        return {
+          text: fastResult.getText(),
+          format: fastResult.getBarcodeFormat().toString(),
+        };
+      } catch {
+        continue;
+      }
+    }
+
+    for (const rotation of robustRotations) {
+      try {
+        const canvas = createNormalizedCanvas(image, rotation, 1800);
+        const fromCanvas = imageReader.decodeFromCanvas(canvas);
+        return {
+          text: fromCanvas.getText(),
+          format: fromCanvas.getBarcodeFormat().toString(),
+        };
+      } catch {
+        continue;
+      }
+    }
+
+    try {
+      const fromImageElement = await imageReader.decodeFromImageElement(image);
+      return {
+        text: fromImageElement.getText(),
+        format: fromImageElement.getBarcodeFormat().toString(),
+      };
+    } catch {
+      throw new Error("No code detected");
+    }
+  } finally {
+    URL.revokeObjectURL(imageUrl);
+  }
+}
 
 export default function HomePage() {
   const router = useRouter();
@@ -206,7 +339,7 @@ export default function HomePage() {
       setScanStatus("scanning");
 
       try {
-        const controls = await barcodeReader.decodeFromVideoDevice(
+        const controls = await cameraReader.decodeFromVideoDevice(
           undefined,
           videoElement,
           async (result) => {
@@ -268,23 +401,17 @@ export default function HomePage() {
       setActionMessage("Fotoğraf analiz ediliyor...");
 
       try {
-        const imageUrl = URL.createObjectURL(file);
+        const { text, format } = await decodeUploadedImage(file);
 
-        try {
-          const result = await barcodeReader.decodeFromImageUrl(imageUrl);
-          const detectedText = result.getText();
-          const detectedFormat = result.getBarcodeFormat().toString();
+        setLastDetectedCode(text);
+        setLastDetectedFormat(format);
+        setScanStatus("detected");
 
-          setLastDetectedCode(detectedText);
-          setLastDetectedFormat(detectedFormat);
-          setScanStatus("detected");
-
-          await applyStockAction(detectedText, activeAction);
-        } finally {
-          URL.revokeObjectURL(imageUrl);
-        }
+        await applyStockAction(text, activeAction);
       } catch {
-        setActionMessage("Fotoğrafta okunabilir QR/barkod bulunamadı.");
+        setActionMessage(
+          "Fotoğrafta okunabilir QR/barkod bulunamadı. Daha yakın, net ve kod kadraja büyük gelecek şekilde tekrar dene."
+        );
         setScanStatus("idle");
       } finally {
         setIsImageScanning(false);
