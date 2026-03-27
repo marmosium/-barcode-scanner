@@ -1,8 +1,9 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { ChangeEvent, useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { BrowserMultiFormatReader, IScannerControls } from "@zxing/browser";
+import { BarcodeFormat, DecodeHintType } from "@zxing/library";
 import { getSupabaseClient } from "@/lib/supabase/client";
 
 type StockRow = {
@@ -16,19 +17,39 @@ type StockRow = {
 
 type StockActionType = "giris" | "cikis";
 
-const barcodeReader = new BrowserMultiFormatReader();
+const supportedFormats = [
+  BarcodeFormat.QR_CODE,
+  BarcodeFormat.CODE_128,
+  BarcodeFormat.CODE_39,
+  BarcodeFormat.EAN_13,
+  BarcodeFormat.EAN_8,
+  BarcodeFormat.UPC_A,
+  BarcodeFormat.UPC_E,
+  BarcodeFormat.ITF,
+  BarcodeFormat.CODABAR,
+];
+
+const hints = new Map();
+hints.set(DecodeHintType.POSSIBLE_FORMATS, supportedFormats);
+
+const barcodeReader = new BrowserMultiFormatReader(hints);
 
 export default function HomePage() {
   const router = useRouter();
   const videoRef = useRef<HTMLVideoElement | null>(null);
+  const imageInputRef = useRef<HTMLInputElement | null>(null);
   const scannerControlsRef = useRef<IScannerControls | null>(null);
   const scannedLockRef = useRef(false);
 
   const [stockRows, setStockRows] = useState<StockRow[]>([]);
   const [loadingRows, setLoadingRows] = useState(true);
   const [isScanning, setIsScanning] = useState(false);
+  const [isImageScanning, setIsImageScanning] = useState(false);
   const [activeAction, setActiveAction] = useState<StockActionType | null>(null);
   const [actionMessage, setActionMessage] = useState<string | null>(null);
+  const [scanStatus, setScanStatus] = useState<"idle" | "ready" | "scanning" | "detected">("idle");
+  const [lastDetectedCode, setLastDetectedCode] = useState<string | null>(null);
+  const [lastDetectedFormat, setLastDetectedFormat] = useState<string | null>(null);
 
   const getClientOrNotify = useCallback(() => {
     try {
@@ -45,6 +66,7 @@ export default function HomePage() {
     scannerControlsRef.current = null;
     scannedLockRef.current = false;
     setIsScanning(false);
+    setScanStatus("idle");
   }, []);
 
   const loadStocks = useCallback(async () => {
@@ -164,6 +186,9 @@ export default function HomePage() {
 
       setActionMessage(null);
       setActiveAction(action);
+      setLastDetectedCode(null);
+      setLastDetectedFormat(null);
+      setScanStatus("ready");
 
       if (!navigator.mediaDevices?.getUserMedia) {
         setActionMessage("Bu cihazda kamera erişimi desteklenmiyor.");
@@ -173,10 +198,12 @@ export default function HomePage() {
       const videoElement = videoRef.current;
       if (!videoElement) {
         setActionMessage("Kamera görüntüsü başlatılamadı.");
+        setScanStatus("idle");
         return;
       }
 
       setIsScanning(true);
+      setScanStatus("scanning");
 
       try {
         const controls = await barcodeReader.decodeFromVideoDevice(
@@ -188,6 +215,14 @@ export default function HomePage() {
             }
 
             scannedLockRef.current = true;
+            setLastDetectedCode(result.getText());
+            setLastDetectedFormat(result.getBarcodeFormat().toString());
+            setScanStatus("detected");
+
+            if (navigator.vibrate) {
+              navigator.vibrate(120);
+            }
+
             controls.stop();
             scannerControlsRef.current = null;
             setIsScanning(false);
@@ -204,6 +239,59 @@ export default function HomePage() {
       }
     },
     [applyStockAction, isScanning, stopScanner]
+  );
+
+  const openImagePicker = useCallback((action: StockActionType) => {
+    setActiveAction(action);
+    setActionMessage(null);
+    setLastDetectedCode(null);
+    setLastDetectedFormat(null);
+    imageInputRef.current?.click();
+  }, []);
+
+  const handleImageUpload = useCallback(
+    async (event: ChangeEvent<HTMLInputElement>) => {
+      const file = event.target.files?.[0];
+
+      if (!file) {
+        return;
+      }
+
+      if (!activeAction) {
+        setActionMessage("Önce stok giriş veya çıkış işlemini seç.");
+        event.target.value = "";
+        return;
+      }
+
+      setIsImageScanning(true);
+      setScanStatus("scanning");
+      setActionMessage("Fotoğraf analiz ediliyor...");
+
+      try {
+        const imageUrl = URL.createObjectURL(file);
+
+        try {
+          const result = await barcodeReader.decodeFromImageUrl(imageUrl);
+          const detectedText = result.getText();
+          const detectedFormat = result.getBarcodeFormat().toString();
+
+          setLastDetectedCode(detectedText);
+          setLastDetectedFormat(detectedFormat);
+          setScanStatus("detected");
+
+          await applyStockAction(detectedText, activeAction);
+        } finally {
+          URL.revokeObjectURL(imageUrl);
+        }
+      } catch {
+        setActionMessage("Fotoğrafta okunabilir QR/barkod bulunamadı.");
+        setScanStatus("idle");
+      } finally {
+        setIsImageScanning(false);
+        event.target.value = "";
+      }
+    },
+    [activeAction, applyStockAction]
   );
 
   useEffect(() => {
@@ -239,12 +327,15 @@ export default function HomePage() {
           <p className="mt-2 text-sm sm:text-base text-zinc-600 dark:text-zinc-400">
             Barkod okutarak stok giriş/çıkış işlemi yapabilir ve mevcut stok tablosunu görebilirsin.
           </p>
+          <p className="mt-1 text-xs sm:text-sm text-zinc-500 dark:text-zinc-400">
+            Desteklenen okuma: QR + Barkod (Code128, EAN-13, EAN-8, UPC, ITF, Codabar)
+          </p>
 
           <div className="mt-4 flex flex-col sm:flex-row gap-3">
             <button
               type="button"
               onClick={() => startScanner("giris")}
-              disabled={isScanning}
+              disabled={isScanning || isImageScanning}
               className="w-full sm:w-auto rounded-xl bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900 px-4 py-2.5 font-medium disabled:opacity-60"
             >
               Stok Giriş
@@ -252,10 +343,26 @@ export default function HomePage() {
             <button
               type="button"
               onClick={() => startScanner("cikis")}
-              disabled={isScanning}
+              disabled={isScanning || isImageScanning}
               className="w-full sm:w-auto rounded-xl border border-zinc-300 dark:border-zinc-700 text-zinc-900 dark:text-zinc-100 px-4 py-2.5 font-medium disabled:opacity-60"
             >
               Stok Çıkış
+            </button>
+            <button
+              type="button"
+              onClick={() => openImagePicker("giris")}
+              disabled={isScanning || isImageScanning}
+              className="w-full sm:w-auto rounded-xl border border-zinc-300 dark:border-zinc-700 text-zinc-900 dark:text-zinc-100 px-4 py-2.5 font-medium disabled:opacity-60"
+            >
+              Fotoğraf Yükle (Giriş)
+            </button>
+            <button
+              type="button"
+              onClick={() => openImagePicker("cikis")}
+              disabled={isScanning || isImageScanning}
+              className="w-full sm:w-auto rounded-xl border border-zinc-300 dark:border-zinc-700 text-zinc-900 dark:text-zinc-100 px-4 py-2.5 font-medium disabled:opacity-60"
+            >
+              Fotoğraf Yükle (Çıkış)
             </button>
             {isScanning && (
               <button
@@ -267,6 +374,15 @@ export default function HomePage() {
               </button>
             )}
           </div>
+
+          <input
+            ref={imageInputRef}
+            type="file"
+            accept="image/*"
+            capture="environment"
+            onChange={handleImageUpload}
+            className="hidden"
+          />
 
           <div className="mt-4 overflow-hidden rounded-xl border border-zinc-200 dark:border-zinc-800 bg-zinc-100 dark:bg-zinc-900">
             <video
@@ -282,6 +398,25 @@ export default function HomePage() {
               </div>
             )}
           </div>
+
+          <div className="mt-3 rounded-lg border border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-900/50 px-3 py-2 text-sm text-zinc-700 dark:text-zinc-300">
+            {scanStatus === "idle" && "Tarayıcı kapalı."}
+            {scanStatus === "ready" && "Kamera hazırlanıyor..."}
+            {scanStatus === "scanning" &&
+              (isImageScanning
+                ? "Fotoğraf analizi aktif: QR veya barkod aranıyor."
+                : "Tarama aktif: QR veya barkodu kameraya göster.")}
+            {scanStatus === "detected" && "Kod algılandı ve işleniyor..."}
+          </div>
+
+          {lastDetectedCode && (
+            <div className="mt-2 rounded-lg border border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-900/50 px-3 py-2 text-sm text-zinc-700 dark:text-zinc-300">
+              <p>
+                Son okunan: <span className="font-medium">{lastDetectedCode}</span>
+              </p>
+              {lastDetectedFormat && <p className="text-xs mt-1">Format: {lastDetectedFormat}</p>}
+            </div>
+          )}
 
           {activeAction && isScanning && (
             <p className="mt-3 text-sm text-zinc-700 dark:text-zinc-300">
